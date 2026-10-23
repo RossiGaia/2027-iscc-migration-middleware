@@ -1,0 +1,178 @@
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dt-confs
+data:
+  config.yaml: |
+    name: "DT1_ABCDEF"
+
+    connections:
+      mqtt:
+        broker_url: "mosquitto.default.svc.cluster.local"
+        port: 1883
+        topics:
+        - "test/#"
+        - "control"
+      mongodb:
+        use: no
+        
+      redis:
+        host: "redis.default.svc.cluster.local"
+        port: 6379
+        db: 0
+
+      buffer:
+        size: 100
+
+    flask:
+      port: 5003
+
+    process:
+      buffer:
+        size: 100
+      burn:
+        workers: 2
+        work: 10000
+      file_checkpoints:
+        use: no
+
+    state:
+      max_size_mb: 10
+
+
+    migration:
+      live:
+        rounds: 10
+
+    logger:
+      level:
+        shell: debug
+        file: error
+        mongo: error
+
+---
+
+apiVersion: test.dev/v1
+kind: CyberPhysicalApplication
+metadata:
+  name: "cpa-1"
+spec:
+  # debug migrazione
+  migrate: false
+  mirrorTime: 30
+  source: ""
+  twinType: "simple"
+  twinOf:
+    - "led_1"
+  requirements:
+    preferredAffinity: "edge"
+    odte: 0.8
+  deployments:
+    - type: "Kubernetes"
+      affinity: "edge"
+      configs:
+        - apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            namespace: default
+            name: dt-1-deployment-edge
+            labels:
+              app: dt-1-edge
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: dt-1-edge
+            template:
+              metadata:
+                labels:
+                  app: dt-1-edge
+                annotations:
+                  # prometheusUrl: "http://prometheus-service.istio-system.svc.cluster.local:9090"
+                  prometheus.io/scrape: "true"
+                  prometheus.io/port: "5003"
+                  prometheus.io/path: "/metrics"
+                  prometheus.io/scrape_fast: "true"
+              spec:
+                containers:
+                  - name: dt-1-edge
+                    # image: busybox:latest
+                    # command: ["sh", "-c", "while true; do echo 'running...'; sleep 5; done"]
+                    image: docker.io/rssgai/dt-flask:distributed-cache-v15
+                    imagePullPolicy: Always
+                    volumeMounts:
+                      - name: dt-confs
+                        mountPath: /app/dt/configs/
+
+                volumes:
+                  - name: dt-confs
+                    configMap:
+                      name: dt-confs
+
+        - apiVersion: v1
+          kind: Service
+          metadata:
+            namespace: default
+            name: dt-1-service-edge
+          spec:
+            selector:
+              app: dt-1-edge
+            ports:
+              - name: http
+                port: 5003
+            type: NodePort
+
+    - type: "Kubernetes"
+      affinity: "mec"
+      configs:
+        - apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            namespace: default
+            name: dt-1-deployment-mec
+            labels:
+              app: dt-1-mec
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: dt-1-mec
+            template:
+              metadata:
+                labels:
+                  app: dt-1-mec
+                annotations:
+                  # prometheusUrl: "http://prometheus-service.istio-system.svc.cluster.local:9090"
+                  prometheus.io/scrape: "true"
+                  prometheus.io/port: "5003"
+                  prometheus.io/path: "/metrics"
+              spec:
+                containers:
+                  - name: dt-1-mec
+                    image: docker.io/rssgai/dt-flask:distributed-cache-v15
+                    imagePullPolicy: Always
+                    # image: busybox:latest
+                    # command: ["sh", "-c", "while true; do echo 'running...'; sleep 5; done"]
+                    volumeMounts:
+                      - name: dt-confs
+                        mountPath: /app/dt/configs/
+
+                volumes:
+                  - name: dt-confs
+                    configMap:
+                      name: dt-confs
+
+        - apiVersion: v1
+          kind: Service
+          metadata:
+            namespace: default
+            name: dt-1-service-mec
+          spec:
+            selector:
+              app: dt-1-mec
+            ports:
+              - name: http
+                port: 5003
+            type: NodePort
