@@ -11,53 +11,7 @@ import requests
 import json
 import os
 from logging.handlers import RotatingFileHandler
-from prometheus_client import Gauge, generate_latest, CONTENT_TYPE_LATEST
 import redis
-
-# metrics
-odte_metric = Gauge("odte", "Overall Digital Twin Entanglement.")
-
-mqtt_active_ts = Gauge("mqtt_active_ts", "Timestamp for MQTT connection. 0 if not set.")
-
-mqtt_inactive_ts = Gauge(
-    "mqtt_inactive_ts", "Timestamp for MQTT connection. 0 if not set."
-)
-
-processing_active_ts = Gauge(
-    "processing_active_ts", "Timestamp processing module started. 0 if not set."
-)
-
-serializing_time = Gauge(
-    "serializing_time", "Time required to perform serialization. 0 if not set."
-)
-
-deserializing_time = Gauge(
-    "deserializing_time", "Time required to perform deserialization. 0 if not set."
-)
-
-live_migration_restore_time = Gauge(
-    "live_migration_restore_time",
-    "Time required to perform live migration. 0 if not set.",
-)
-
-rebuild_duration_time = Gauge(
-    "rebuild_duration_time", "Time to complete the rebuild phase. 0 if not set."
-)
-
-mqtt_request_disconnect_target_ts = Gauge(
-    "mqtt_request_disconnect_target_ts",
-    "Timestamp when mqtt disconnection is requested to target dt. 0 if not set.",
-)
-
-
-mqtt_active_ts.set(0)
-mqtt_inactive_ts.set(0)
-processing_active_ts.set(0)
-serializing_time.set(0)
-deserializing_time.set(0)
-live_migration_restore_time.set(0)
-rebuild_duration_time.set(0)
-mqtt_request_disconnect_target_ts.set(0)
 
 # for live migration
 migration_done = None
@@ -68,8 +22,6 @@ confs = yaml.safe_load(open(conf_path))
 dt_name = confs["name"]
 flask_port = int(confs["flask"]["port"])
 process_conf = confs["process"]
-process_burn_worker = process_conf["burn"]["workers"]
-process_burn_work = process_conf["burn"]["work"]
 
 connection_conf = confs["connections"]
 connection_buffer_conf = connection_conf["buffer"]["size"]
@@ -203,8 +155,6 @@ processing = Processing(
     processing_buffer=processing_buffer,
     state_max_size_mb=state_max_size_mb,
     state_max_entry_size_kb=state_max_entry_size_kb,
-    worker=process_burn_worker,
-    work=process_burn_work,
     use_mongo=connection_use_mongo,
     mongo_url=connection_mongo_url,
     mongo_db=connection_mongo_db,
@@ -238,7 +188,6 @@ if source_dt_url_delta:
         logger.error("Error in disconnecting the source DT")
         exit(1)
     mqtt_disconnect_request_ts = time.time()
-    mqtt_request_disconnect_target_ts.set(mqtt_disconnect_request_ts)
 
     # call last delta
     logger.debug("Calling last delta.")
@@ -251,7 +200,6 @@ if source_dt_url_delta:
     logger.info(
         f"Restoring total time: {live_migration_total_time}. Started at: {restore_start_timestamp}, ended at: {restore_end_timestamp}."
     )
-    live_migration_restore_time.set(live_migration_total_time)
     # with open("test_file_dest.json", "x") as file:
     #     file.writelines(json.dumps(processing.serialize_state()))
 
@@ -269,7 +217,6 @@ def rebuild():
         return jsonify({"message": "Error in rebuild process."}), 500
 
     rebuild_total_time = time.time() - rebuild_start_time
-    rebuild_duration_time.set(rebuild_total_time)
     migration_done = True
     return jsonify({"message": f"Rebuild success. Total time: {rebuild_total_time}"})
 
@@ -304,7 +251,6 @@ def set_state():
 def disconnect():
     disconnection_time = time.time()
     logger.info(f"Disconnecting from mqtt. Time: {disconnection_time}")
-    mqtt_inactive_ts.set(disconnection_time)
     # with open("test_file_source.json", "x") as file:
     #     file.writelines(json.dumps(processing.serialize_state()))
     try:
@@ -324,7 +270,6 @@ def reconnect():
         mqtt_t = threading.Thread(target=mqtt_connection.run)
         mqtt_t.start()
         reconnection_time = time.time()
-        mqtt_active_ts.set(reconnection_time)
         logger.info(f"Reconnecting to mqtt. Time: {reconnection_time}")
     except:
         return jsonify({"status": "error"})
@@ -341,13 +286,6 @@ def health_check():
 def odte():
     body = f"odte {float(processing.get_odte())}"
     return Response(body, mimetype="text/plain; version=0.0.4; charset=utf-8")
-
-
-@app.route("/metrics")
-def get_metrics():
-    global odte_metric
-    odte_metric.set(processing.get_odte())
-    return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
 
 
 @app.route("/delta")
@@ -379,14 +317,12 @@ if __name__ == "__main__":
         mqtt_t = threading.Thread(target=mqtt_connection.run)
         mqtt_t.start()
         mqtt_connected_ts = time.time()
-        mqtt_active_ts.set(mqtt_connected_ts)
         logger.info(f"Connected to mqtt. Time: {mqtt_connected_ts}")
         migration_done = True
 
     processing_t = threading.Thread(target=processing.run)
     processing_t.start()
     processing_start_ts = time.time()
-    processing_active_ts.set(processing_start_ts)
 
     logger.info(f"Processing started at: {processing_start_ts}")
 

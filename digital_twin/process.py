@@ -64,8 +64,6 @@ class Processing:
         processing_buffer,
         state_max_size_mb=10,
         state_max_entry_size_kb=10,
-        worker=0,
-        work=0,
         use_mongo=False,
         mongo_url=None,
         mongo_db=None,
@@ -83,19 +81,13 @@ class Processing:
         self.odte = None
         self.lock = threading.Lock()
         self.transmitted_state = {}
-        self.burn_worker = worker
-        self.burn_work = work
-        self.burn_queue = queue.Queue(maxsize=self.burn_worker * 2)
-        self.burn_threads = []
         self.last_transmitted_processing_seq_no = -1
         self.use_mongo = use_mongo
         self.mongo_url = mongo_url
         self.mongo_db = mongo_db
         self.mongo_collection = mongo_collection
-        self.odte_expected_msg_sec = (odte_expected_msg_sec,)
         self.odte_t = threading.Thread(target=self.odte_computation, daemon=True)
         self.messages_buffer = messages_buffer
-        self.burn_feeder_t = threading.Thread(target=self.burn_feeder_loop, daemon=True)
 
         self.redis_client = redis_client
         self.recent_rows = []
@@ -111,14 +103,6 @@ class Processing:
             except:
                 logger.error("Could not connect to mongo.")
                 sys.exit(1)
-
-        if self.burn_worker > 0 and self.burn_work > 0:
-            for i in range(self.burn_worker):
-                t = threading.Thread(target=self.burn_worker_loop, daemon=True)
-                t.start()
-                self.burn_threads.append(t)
-
-            self.burn_feeder_t.start()
 
     def _load_from_redis(self):
         p = self.redis_client.pipeline()
@@ -346,13 +330,6 @@ class Processing:
 
     def stop(self):
         self.running = False
-        for _ in range(self.burn_worker):
-            try:
-                self.burn_queue.put(None, timeout=0.1)
-            except queue.Full:
-                pass
-        for t in self.burn_threads:
-            t.join(timeout=1.0)
 
     def _safe_float(self, value, default=0.0):
         """Coerce to float safely."""
@@ -481,8 +458,6 @@ class Processing:
         docs = list(cursor)[::-1]
         # logger.debug(f"Documents retrived:\n{events}")
 
-        rebuilt = []
-
         for doc in docs:
             if "payload" not in doc:
                 continue
@@ -602,27 +577,3 @@ class Processing:
 
             new_proc_buffer = different_items["processing_buffer"]
             self.processing_buffer.extend(new_proc_buffer)
-
-    def _burn_cpu_primes(self, max_n: int):
-        for i in range(3, max_n + 1):
-            is_prime = True
-            for j in range(2, int(i**0.5) + 1):
-                if i % j == 0:
-                    is_prime = False
-                    break
-
-    def burn_worker_loop(self):
-        while True:
-            work = self.burn_queue.get()
-            if work is None:
-                self.burn_queue.task_done()
-                break
-            self._burn_cpu_primes(work)
-            self.burn_queue.task_done()
-
-    def burn_feeder_loop(self):
-        while self.running:
-            try:
-                self.burn_queue.put(self.burn_work, timeout=0.1)
-            except queue.Full:
-                pass
