@@ -1,0 +1,3 @@
+[submodule "cluster/kubemake"]
+	path = cluster/kubemake
+	url = https://github.com/fglmtt/kubemake
