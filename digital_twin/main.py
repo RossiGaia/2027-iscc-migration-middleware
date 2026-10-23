@@ -16,8 +16,8 @@ import redis
 # for live migration
 migration_done = None
 
-conf_path = "/app/dt/configs/config.yaml"
-# conf_path = "./config.yaml"
+# conf_path = "/app/dt/configs/config.yaml"
+conf_path = os.environ.get("CONFIG_PATH", "./config.yaml")
 confs = yaml.safe_load(open(conf_path))
 dt_name = confs["name"]
 flask_port = int(confs["flask"]["port"])
@@ -82,24 +82,24 @@ def setup_logging():
         fh.setLevel(level)
         return fh
 
-    process_fh = file_handler(
-        f"dt_process_{dt_name}.log", getattr(logging, file_level.upper(), logging.INFO)
-    )
-    connections_fh = file_handler(
-        f"dt_connections_{dt_name}.log",
-        getattr(logging, file_level.upper(), logging.INFO),
-    )
-    main_fh = file_handler(
-        f"dt_main_{dt_name}.log", getattr(logging, file_level.upper(), logging.INFO)
-    )
+    # process_fh = file_handler(
+    #     f"dt_process_{dt_name}.log", getattr(logging, file_level.upper(), logging.INFO)
+    # )
+    # connections_fh = file_handler(
+    #     f"dt_connections_{dt_name}.log",
+    #     getattr(logging, file_level.upper(), logging.INFO),
+    # )
+    # main_fh = file_handler(
+    #     f"dt_main_{dt_name}.log", getattr(logging, file_level.upper(), logging.INFO)
+    # )
+
+    # log_process.addHandler(process_fh)
+    # log_connections.addHandler(connections_fh)
+    # log_main.addHandler(main_fh)
 
     log_process = logging.getLogger("process")
     log_connections = logging.getLogger("connections")
     log_main = logging.getLogger("__main__")
-
-    log_process.addHandler(process_fh)
-    log_connections.addHandler(connections_fh)
-    log_main.addHandler(main_fh)
 
     log_process.propagate = True
     log_connections.propagate = True

@@ -105,6 +105,7 @@ class Processing:
                 sys.exit(1)
 
     def _load_from_redis(self):
+        logger.debug("Loaded from Redis.")
         p = self.redis_client.pipeline()
         p.lrange("buf", -self.cfg.rolling_window, -1)
         p.get("params")
@@ -116,6 +117,7 @@ class Processing:
         self.last_applied_pt_seq = int(seq) if seq is not None else -1
 
     def _save_to_redis(self, snap):
+        logger.debug("Saved to Redis.")
         p = self.redis_client.pipeline()
         p.rpush("buf", json.dumps(snap))
         p.ltrim("buf", -self.processing_buffer.maxlen, -1)
