@@ -3,14 +3,12 @@ import time
 import json
 import collections
 import threading
-import queue
-from typing import Any
 import pymongo
 import sys
 import logging
 import itertools
 import events
-import redis
+from redis import StrictRedis
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +58,8 @@ class Processing:
     def __init__(
         self,
         *,
-        connection_buffer,
-        processing_buffer,
+        connection_buffer: collections.deque,
+        processing_buffer: collections.deque,
         state_max_size_mb=10,
         state_max_entry_size_kb=10,
         use_mongo=False,
@@ -70,7 +68,7 @@ class Processing:
         mongo_collection=None,
         odte_expected_msg_sec=1,
         messages_buffer,
-        redis_client=None
+        redis_client: StrictRedis | None
     ):
         self.connection_buffer = connection_buffer
         self.processing_buffer = processing_buffer
@@ -78,7 +76,7 @@ class Processing:
         self.running = True
         self.conveyor_params = VirtualizedConveyorPlant()
         self.state_max_size_mb = state_max_size_mb
-        self.odte = None
+        self.odte = 0.0
         self.lock = threading.Lock()
         self.transmitted_state = {}
         self.last_transmitted_processing_seq_no = -1
@@ -106,6 +104,7 @@ class Processing:
 
     def _load_from_redis(self):
         logger.debug("Loaded from Redis.")
+        assert self.redis_client is not None
         p = self.redis_client.pipeline()
         p.lrange("buf", -self.cfg.rolling_window, -1)
         p.get("params")
@@ -118,8 +117,10 @@ class Processing:
 
     def _save_to_redis(self, snap):
         logger.debug("Saved to Redis.")
+        assert self.redis_client is not None
         p = self.redis_client.pipeline()
         p.rpush("buf", json.dumps(snap))
+        assert self.processing_buffer.maxlen is not None
         p.ltrim("buf", -self.processing_buffer.maxlen, -1)
         p.set("params", json.dumps(asdict(self.conveyor_params)))
         p.set("last_seq", self.last_applied_pt_seq)
@@ -170,8 +171,10 @@ class Processing:
             events.emit(
                 "update",
                 seq=seq,
+                creation_ts=raw_msg["payload"]["creation_timestamp"],
                 recv_ts=raw_msg["recv_timestamp"],
                 apply_ts=time.time(),
+                processing_time_s=processing_time,
                 origin=raw_msg.get("origin", "live"),
             )
             logger.debug(f"time to elaborate the message: {processing_time}")
@@ -445,6 +448,12 @@ class Processing:
         return 0
 
     def rebuild(self):
+        assert self.processing_buffer.maxlen is not None
+        assert self.connection_buffer.maxlen is not None
+        assert self.mongo_client is not None
+        assert self.mongo_db is not None
+        assert self.mongo_collection is not None
+
         t0 = time.time()
         logger.debug(f"Use mongo is {self.use_mongo}")
         if not self.use_mongo:
@@ -479,6 +488,8 @@ class Processing:
 
         mongo_docs_retrival_time = time.time() - t0
         logger.info(f"Time to retrieve mongo docs {mongo_docs_retrival_time}.")
+
+        return len(docs)
 
     def odte_computation(self):
         while self.running:

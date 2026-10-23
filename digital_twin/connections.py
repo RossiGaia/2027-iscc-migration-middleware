@@ -6,9 +6,9 @@ import random
 import string
 import pymongo
 import threading
-import collections
 import sys
 import queue
+import events
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,10 @@ class MqttConnection:
         self.mqtt_client.on_message = self.on_message
 
     def mongo_writer(self):
+        assert self.connection_buffer.maxlen is not None
+        assert self.mongo_client is not None
+        assert self.mongo_db is not None
+        assert self.mongo_collection is not None
         coll = self.mongo_client[self.mongo_db][self.mongo_collection]
         while self.mqtt_loop_run or not self.mongo_queue.empty():
             try:
@@ -69,7 +73,9 @@ class MqttConnection:
         return
 
     def on_connect(self, client, userdata, flags, reason_code, properties):
+        assert self.mqtt_client is not None
         logger.info(f"connected to {self.mqtt_broker_url} at port {self.mqtt_port}.")
+        events.emit("mqtt_connected")
         for topic in self.mqtt_topics:
             logger.debug(f"subscribing to {topic}.")
             self.mqtt_client.subscribe(topic, qos=1)
@@ -98,6 +104,7 @@ class MqttConnection:
             self.mongo_t = threading.Thread(target=self.mongo_writer, daemon=True)
             self.mongo_t.start()
         self.new_client()
+        assert self.mqtt_client is not None
         logger.info(f"connecting to {self.mqtt_broker_url} at {self.mqtt_port}.")
         self.mqtt_client.connect(self.mqtt_broker_url, self.mqtt_port)
         self.mqtt_client.loop_start()
@@ -114,6 +121,7 @@ class MqttConnection:
         self.mqtt_client = None
 
         if self.use_mongo:
+            assert self.mongo_t is not None
             self.mongo_t.join()
 
         return

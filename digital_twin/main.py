@@ -8,10 +8,9 @@ import yaml
 import logging
 import time
 import requests
-import json
 import os
-from logging.handlers import RotatingFileHandler
 import redis
+import events
 
 # for live migration
 migration_done = None
@@ -75,27 +74,6 @@ def setup_logging():
     sh.setFormatter(fmt)
     sh.setLevel(getattr(logging, shell_level.upper(), logging.INFO))
     root.addHandler(sh)
-
-    def file_handler(path: str, level=logging.INFO):
-        fh = RotatingFileHandler(path, maxBytes=10 * 1024 * 1024, backupCount=5)
-        fh.setFormatter(fmt)
-        fh.setLevel(level)
-        return fh
-
-    # process_fh = file_handler(
-    #     f"dt_process_{dt_name}.log", getattr(logging, file_level.upper(), logging.INFO)
-    # )
-    # connections_fh = file_handler(
-    #     f"dt_connections_{dt_name}.log",
-    #     getattr(logging, file_level.upper(), logging.INFO),
-    # )
-    # main_fh = file_handler(
-    #     f"dt_main_{dt_name}.log", getattr(logging, file_level.upper(), logging.INFO)
-    # )
-
-    # log_process.addHandler(process_fh)
-    # log_connections.addHandler(connections_fh)
-    # log_main.addHandler(main_fh)
 
     log_process = logging.getLogger("process")
     log_connections = logging.getLogger("connections")
@@ -161,13 +139,13 @@ processing = Processing(
     mongo_collection=connection_mongo_collection,
     messages_buffer=messages_buffer,
     odte_expected_msg_sec=odte_expected_msg_sec,
-    redis_client=redis_client
+    redis_client=redis_client,
 )
 
 # check if migrated dt
 # live replication
-source_dt_url_delta = os.environ.get("SOURCE_DT_URL_DELTA")
-source_dt_url_disconnect = os.environ.get("SOURCE_DT_URL_DISCONNECT")
+source_dt_url_delta = os.environ.get("SOURCE_DT_URL_DELTA", "")
+source_dt_url_disconnect = os.environ.get("SOURCE_DT_URL_DISCONNECT", "")
 
 if source_dt_url_delta:
     migration_done = False
@@ -175,10 +153,21 @@ if source_dt_url_delta:
     # start requesting delta
     logger.info(f"DT is migrated. Starting live migration.")
     max_rounds = int(confs["migration"]["live"]["rounds"])
+    events.emit("precopy_start")
     for i in range(max_rounds - 1):
+        t0 = time.time()
         resp = requests.get(source_dt_url_delta)
-        obj = json.loads(resp.text)
+        obj = resp.json()
+        t1 = time.time()
         processing.process_delta(obj)
+        events.emit(
+            "precopy_round",
+            round=i,
+            bytes=len(resp.content),
+            entries=len(obj["processing_buffer"]),
+            fetch_s=t1 - t0,
+            apply_s=time.time() - t1,
+        )
         time.sleep(1)
 
     # call disconnect on old dt
@@ -188,20 +177,30 @@ if source_dt_url_delta:
         logger.error("Error in disconnecting the source DT")
         exit(1)
     mqtt_disconnect_request_ts = time.time()
+    events.emit("source_disconnected")
 
     # call last delta
     logger.debug("Calling last delta.")
+    t0 = time.time()
     resp = requests.get(source_dt_url_delta)
-    obj = json.loads(resp.text)
+    obj = resp.json()
+    t1 = time.time()
     processing.process_delta(obj)
+    events.emit(
+        "precopy_round",
+        round="final",
+        bytes=len(resp.content),
+        entries=len(obj["processing_buffer"]),
+        fetch_s=t1 - t0,
+        apply_s=time.time() - t1,
+    )
+    events.emit("precopy_end")
 
     restore_end_timestamp = time.time()
     live_migration_total_time = restore_end_timestamp - restore_start_timestamp
     logger.info(
         f"Restoring total time: {live_migration_total_time}. Started at: {restore_start_timestamp}, ended at: {restore_end_timestamp}."
     )
-    # with open("test_file_dest.json", "x") as file:
-    #     file.writelines(json.dumps(processing.serialize_state()))
 
 startup_mqtt_connection = int(os.environ.get("STARTUP_MQTT_CONNECTION", 1))
 
@@ -210,13 +209,15 @@ startup_mqtt_connection = int(os.environ.get("STARTUP_MQTT_CONNECTION", 1))
 def rebuild():
     global migration_done
     migration_done = False
+    events.emit("rebuild_start")
     rebuild_start_time = time.time()
     try:
-        processing.rebuild()
+        n = processing.rebuild()
     except:
         return jsonify({"message": "Error in rebuild process."}), 500
 
     rebuild_total_time = time.time() - rebuild_start_time
+    events.emit("rebuild_end", docs=n)
     migration_done = True
     return jsonify({"message": f"Rebuild success. Total time: {rebuild_total_time}"})
 
@@ -251,14 +252,13 @@ def set_state():
 def disconnect():
     disconnection_time = time.time()
     logger.info(f"Disconnecting from mqtt. Time: {disconnection_time}")
-    # with open("test_file_source.json", "x") as file:
-    #     file.writelines(json.dumps(processing.serialize_state()))
     try:
         mqtt_connection.stop()
         mqtt_t.join()
     except:
         return jsonify({"status": "error"})
 
+    events.emit("mqtt_disconnected", last_seq=processing.last_applied_pt_seq)
     return jsonify({"status": "success"})
 
 
@@ -273,7 +273,7 @@ def reconnect():
         logger.info(f"Reconnecting to mqtt. Time: {reconnection_time}")
     except:
         return jsonify({"status": "error"})
-
+    events.emit("mqtt_connected")
     return jsonify({"status": "success"})
 
 
@@ -312,6 +312,7 @@ def get_migration_status():
 
 if __name__ == "__main__":
     logger.debug("Started main.")
+    events.emit("dt_start")
 
     if startup_mqtt_connection != 0:
         mqtt_t = threading.Thread(target=mqtt_connection.run)
