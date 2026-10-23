@@ -10,6 +10,7 @@ import sys
 import logging
 import itertools
 import events
+import redis
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,7 @@ class Processing:
         mongo_collection=None,
         odte_expected_msg_sec=1,
         messages_buffer,
+        redis_client=None
     ):
         self.connection_buffer = connection_buffer
         self.processing_buffer = processing_buffer
@@ -95,6 +97,9 @@ class Processing:
         self.messages_buffer = messages_buffer
         self.burn_feeder_t = threading.Thread(target=self.burn_feeder_loop, daemon=True)
 
+        self.redis_client = redis_client
+        self.recent_rows = []
+
         self.cfg = ProcessingConfig(odte_expected_msg_sec)
         self.state_max_entry_size_kb = state_max_entry_size_kb
 
@@ -115,6 +120,25 @@ class Processing:
 
             self.burn_feeder_t.start()
 
+    def _load_from_redis(self):
+        p = self.redis_client.pipeline()
+        p.lrange("buf", -self.cfg.rolling_window, -1)
+        p.get("params")
+        p.get("last_seq")
+        rows, params, seq = p.execute()
+        self.recent_rows = [json.loads(x) for x in rows]
+        if params:
+            self.conveyor_params = VirtualizedConveyorPlant(**json.loads(params))
+        self.last_applied_pt_seq = int(seq) if seq is not None else -1
+
+    def _save_to_redis(self, snap):
+        p = self.redis_client.pipeline()
+        p.rpush("buf", json.dumps(snap))
+        p.ltrim("buf", -self.processing_buffer.maxlen, -1)
+        p.set("params", json.dumps(asdict(self.conveyor_params)))
+        p.set("last_seq", self.last_applied_pt_seq)
+        p.execute()
+
     def run(self):
         self.odte_t.start()
 
@@ -131,6 +155,9 @@ class Processing:
                 time.sleep(0.001)
                 continue
 
+            if self.redis_client:
+                self._load_from_redis()
+            
             seq = raw_msg["payload"]["seq_id"]
             if seq <= self.last_applied_pt_seq:
                 continue
@@ -145,8 +172,13 @@ class Processing:
             processing_time = time.time() - t0
             snap["processing_time_s"] = processing_time
 
+            
+            if self.redis_client:
+                self._save_to_redis(snap)
+            else:
+                with self.lock:
+                    self.processing_buffer.append(snap)
             with self.lock:
-                self.processing_buffer.append(snap)
                 self._record_observation(snap, processing_time)
 
             events.emit(
@@ -332,13 +364,14 @@ class Processing:
             return float(default)
 
     def _rolling_stats(self, key: str, window: int = 50):
-        with self.lock:
-            if not self.processing_buffer:
-                return {"mean": None, "slope_per_s": None}
+        if self.redis_client:
+            rows = self.recent_rows
+        else:
+            with self.lock:
+                rows = list(itertools.islice(reversed(self.processing_buffer), window))[::-1]
+        if not rows:
+            return {"mean": None, "slope_per_s": None}
 
-            rows = list(itertools.islice(reversed(self.processing_buffer), window))[
-                ::-1
-            ]
         pairs = []
         for r in rows:
             y = r.get(key)
@@ -411,13 +444,9 @@ class Processing:
         start_time = time.time()
         with self.lock:
             try:
-                connection_buffer_maxlen = serialized_state["connection_buffer_maxlen"]
                 processing_buffer_maxlen = serialized_state["processing_buffer_maxlen"]
                 self.last_applied_pt_seq = serialized_state["last_applied_pt_seq"]
-                self.connection_buffer = collections.deque(
-                    serialized_state["connection_buffer"],
-                    maxlen=connection_buffer_maxlen,
-                )
+                self.connection_buffer.extend(serialized_state["connection_buffer"])
                 self.processing_buffer = collections.deque(
                     serialized_state["processing_buffer"],
                     maxlen=processing_buffer_maxlen,
@@ -449,12 +478,12 @@ class Processing:
             .sort("payload.seq_id", -1)
             .limit(self.processing_buffer.maxlen)
         )
-        events = list(cursor)[::-1]
+        docs = list(cursor)[::-1]
         # logger.debug(f"Documents retrived:\n{events}")
 
         rebuilt = []
 
-        for doc in events:
+        for doc in docs:
             if "payload" not in doc:
                 continue
 

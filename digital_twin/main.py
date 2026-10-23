@@ -12,6 +12,7 @@ import json
 import os
 from logging.handlers import RotatingFileHandler
 from prometheus_client import Gauge, generate_latest, CONTENT_TYPE_LATEST
+import redis
 
 # metrics
 odte_metric = Gauge("odte", "Overall Digital Twin Entanglement.")
@@ -86,6 +87,16 @@ if connection_use_mongo:
 
 state_max_size_mb = confs.get("state").get("max_size_mb", 10)
 state_max_entry_size_kb = confs.get("state").get("max_entry_size_kb", 10)
+state_backend = confs.get("state").get("backend", "local")
+
+redis_confs = connection_conf["redis"]
+redis_host = redis_confs["host"]
+redis_port = redis_confs["port"]
+redis_db = int(redis_confs["db"])
+if state_backend == "redis":
+    redis_client = redis.StrictRedis(host=redis_host, port=redis_port, db=redis_db)
+else:
+    redis_client = None
 
 processing_buffer_size = round(state_max_size_mb / (state_max_entry_size_kb / 1024.0))
 
@@ -200,6 +211,7 @@ processing = Processing(
     mongo_collection=connection_mongo_collection,
     messages_buffer=messages_buffer,
     odte_expected_msg_sec=odte_expected_msg_sec,
+    redis_client=redis_client
 )
 
 # check if migrated dt
