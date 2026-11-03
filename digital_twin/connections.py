@@ -39,6 +39,7 @@ class MqttConnection:
         self.mongo_url = mongo_url
         self.mongo_db = mongo_db
         self.mongo_collection = mongo_collection
+        self.writer_stop = threading.Event()
         self.client_id = mqtt_conf["client_id"]
         if self.use_mongo:
             self.mongo_queue = queue.Queue()
@@ -64,7 +65,7 @@ class MqttConnection:
         assert self.mongo_db is not None
         assert self.mongo_collection is not None
         coll = self.mongo_client[self.mongo_db][self.mongo_collection]
-        while self.mqtt_loop_run or not self.mongo_queue.empty():
+        while not self.writer_stop.is_set() or not self.mongo_queue.empty():
             try:
                 batch = [self.mongo_queue.get(timeout=0.1)]
             except queue.Empty:
@@ -103,6 +104,7 @@ class MqttConnection:
 
     def run(self):
         if self.use_mongo:
+            self.writer_stop.clear()
             self.mongo_t = threading.Thread(target=self.mongo_writer, daemon=True)
             self.mongo_t.start()
         self.new_client()
@@ -124,6 +126,7 @@ class MqttConnection:
 
         if self.use_mongo:
             assert self.mongo_t is not None
+            self.writer_stop.set()
             self.mongo_t.join()
 
         return
