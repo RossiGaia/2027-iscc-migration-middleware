@@ -12,6 +12,8 @@ import os
 import redis
 import events
 
+events.emit("process_start")
+
 # for live migration
 migration_done = None
 
@@ -20,7 +22,6 @@ conf_path = os.environ.get("CONFIG_PATH", "./config.yaml")
 confs = yaml.safe_load(open(conf_path))
 dt_name = confs["name"]
 flask_port = int(confs["flask"]["port"])
-process_conf = confs["process"]
 
 connection_conf = confs["connections"]
 connection_buffer_conf = connection_conf["buffer"]["size"]
@@ -154,6 +155,7 @@ if source_dt_url_delta:
     logger.info(f"DT is migrated. Starting live migration.")
     max_rounds = int(confs["migration"]["live"]["rounds"])
     events.emit("precopy_start")
+    prev = None
     for i in range(max_rounds - 1):
         t0 = time.time()
         resp = requests.get(source_dt_url_delta)
@@ -161,13 +163,17 @@ if source_dt_url_delta:
         t1 = time.time()
         processing.process_delta(obj)
         events.emit(
-            "precopy_round",
-            round=i,
-            bytes=len(resp.content),
-            entries=len(obj["processing_buffer"]),
-            fetch_s=t1 - t0,
-            apply_s=time.time() - t1,
-        )
+                    "precopy_round",
+                    round=i,
+                    bytes=len(resp.content),
+                    entries=len(obj["processing_buffer"]),
+                    fetch_s=t1 - t0,
+                    apply_s=time.time() - t1,
+                )
+        n = len(obj["processing_buffer"])
+        if n <= 2 or (prev is not None and n >= 0.9 * prev):
+            break
+        prev = n
         time.sleep(1)
 
     # call disconnect on old dt
@@ -309,6 +315,27 @@ def get_migration_status():
     global migration_done
     return jsonify({"status": migration_done})
 
+@app.route("/profile")
+def profile():
+    with processing.lock:
+        obs = list(processing.observations)
+        now = time.time()
+        rate = sum(1 for m in processing.messages_buffer
+                   if now - m["recv_timestamp"] <= 10) / 10
+        entries = redis_client.llen("buf") if redis_client else len(processing.processing_buffer)
+    p = sum(o["execution_time_s"] for o in obs) / len(obs) if obs else 0.0
+    return jsonify({"entries": entries,
+                    "entry_bytes": processing.state_max_entry_size_kb * 1024,
+                    "rate": rate, "p": p})
+
+@app.route("/pending")
+def pending():
+    return jsonify({"pending": len(processing.connection_buffer)})
+
+@app.route("/preload", methods=["POST"])
+def preload():
+    processing.preload(int(request.args["n"]))
+    return jsonify({"message": "Success."}), 201
 
 if __name__ == "__main__":
     logger.debug("Started main.")

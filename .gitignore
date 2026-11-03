@@ -5,6 +5,8 @@ secrets*
 out/*
 hosts
 digital_twin/config-*.yaml
+runs-*
+pilot-runs
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

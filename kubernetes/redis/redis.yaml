@@ -11,11 +11,13 @@ spec:
       labels:
         app: redis
     spec:
+      nodeSelector: {zone: cloud}
       containers:
       - name: redis
-        image: redis:latest
+        image: redis:8.8.3
         ports:
         - containerPort: 6379
+        args: ["--save", "", "--appendonly", "no"]
 
 ---
 

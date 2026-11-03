@@ -15,7 +15,16 @@ import random
 import threading
 from flask import Flask
 import signal
+import argparse
 
+ap = argparse.ArgumentParser()
+ap.add_argument("--rate", type=float, required=True)
+ap.add_argument("--start-seq", type=int, default=0)
+ap.add_argument("--run-id", default="")
+ap.add_argument("--events", default="pt.jsonl")
+ap.add_argument("--config", default="config.yaml")
+args = ap.parse_args()
+seq_id = args.start_seq
 
 def graceful_shutdown(signum, frame):
     cnv1.stop()
@@ -25,6 +34,7 @@ def graceful_shutdown(signum, frame):
 
 
 signal.signal(signal.SIGINT, graceful_shutdown)
+signal.signal(signal.SIGTERM, graceful_shutdown)
 
 app = Flask(__name__)
 
@@ -32,13 +42,11 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
-config_path = "config.yaml"
+config_path = args.config
 configs = yaml.safe_load(open(config_path))
 sensors_config = configs["sensors"]
 mqtt_config = sensors_config["mqtt"]
 flask_port = int(configs["web"].get("port", 5001))
-
-seq_id = 0
 
 @dataclass
 class ConveyorParams:
@@ -59,7 +67,7 @@ class ConveyorParams:
 
 @dataclass
 class ConveyorConnectionParams:
-    sensors_updates_per_second: float = sensors_config["updates_per_second"]
+    sensors_updates_per_second: float = args.rate
     mqtt_broker_url: str = mqtt_config["broker_url"]
     mqtt_port: int = mqtt_config["port"]
     mqtt_topic: str = mqtt_config["topic"]
@@ -213,6 +221,8 @@ class ConveyorPlant:
 
         self.mqtt_client.loop_start()
 
+        period = 1.0 / args.rate
+        next_t = time.time()
         while self.running:
             with self._lock:
                 data = {
@@ -233,13 +243,17 @@ class ConveyorPlant:
                 }
             payload = json.dumps(data)
             self.mqtt_client.publish(self.mqtt_connection.mqtt_topic, payload, qos=1)
+            _ev.write(json.dumps({"event": "pt_update", "run_id": args.run_id,
+                      "seq": seq_id, "creation_ts": data["creation_timestamp"]}) + "\n")
             seq_id += 1
+            next_t += period
+            time.sleep(max(0.0, next_t - time.time()))
             logger.debug(f"Seq_id: {seq_id}")
-            time.sleep(1.0 / self.mqtt_connection.sensors_updates_per_second)
 
         self.mqtt_client.loop_stop()
 
 
+_ev = open(args.events, "a", buffering=1)
 cnv1 = ConveyorPlant()
 
 cnv1_t = threading.Thread(target=cnv1.run)

@@ -1,0 +1,43 @@
+results_dir: runs-recheck
+seed: 42
+max_attempts: 3
+
+grid:
+  state_mb: [10, 250]
+  bw_mbps: [25]
+  rate: [50]
+  directions: ["edge->cloud", "cloud->edge"]
+  strategies: [replicate, rebuild]
+  reps: 1
+
+rtt_ms: 20
+entry_kb: 10
+warmup_s: 60
+tail_s: 10
+odte_threshold: 0.9
+stable_s: 5
+recovery_timeout_s: 300
+max_clock_offset_ms: 2
+
+ssh_user: ubuntu
+iface: ens3
+node_host: 10.16.11.149
+nodes:                       # nodes the runner checks and shapes
+  edge: 10.16.11.170
+  cloud: 10.16.11.181
+  control-plane: 10.16.11.149
+
+services: [mosquitto, redis, mongo]   # app labels of the shared services
+mongo: { user: user, password: pass, db: pt, collection: events }
+mqtt: { host: 10.16.11.181, port: 31883, client_id: dt_1 }
+
+cpa_name: cpa-1
+cpa_template: cpa-1.yaml               # the CPA only, without the ConfigMap
+dt_config_template: dt-config.yaml   # the DT's config.yaml
+dt_apps: { edge: dt-1-edge, cloud: dt-1-cloud }
+dt_services: { edge: dt-1-service-edge, cloud: dt-1-service-cloud }
+
+link_file: link.json
+operator_events: operator.jsonl
+
+pt_command: "python3 /home/ubuntu/pt/main.py --rate {rate} --start-seq {start_seq} --run-id {run_id} --events {events} --config /home/ubuntu/pt/config.yaml"

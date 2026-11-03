@@ -25,16 +25,10 @@ spec:
       labels:
         app: mosquitto
     spec:
+      nodeSelector: {zone: cloud}
       containers:
       - name: mosquitto-container
         image: eclipse-mosquitto:openssl
-        resources:
-          requests:
-            cpu: "100m"
-            memory: "128Mi"
-          limits:
-            cpu: "500m"
-            memory: "256Mi"
         ports:
         - containerPort: 1883
         volumeMounts:
@@ -59,4 +53,5 @@ spec:
   ports:
   - port: 1883
     targetPort: 1883
+    nodePort: 31883
 

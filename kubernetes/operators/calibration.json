@@ -1,0 +1,22 @@
+{
+  "rolling_window": 50,
+  "precopy_rounds": 2,
+  "precopy_wait_s": 1,
+  "redis_round_trips": 2,
+  "p_redis_local": 0.0085,
+  "t_delete": 2.0,
+  "handover_s": 0.2,
+  "event_bytes": 380,
+  "edge": {
+    "t_start": 1.3,
+    "p": 0.001,
+    "r": 0.00037,
+    "ser_bps": 28e6
+  },
+  "cloud": {
+    "t_start": 1.3,
+    "p": 0.001,
+    "r": 0.00037,
+    "ser_bps": 28e6
+  }
+}

@@ -66,10 +66,12 @@ class MqttConnection:
         coll = self.mongo_client[self.mongo_db][self.mongo_collection]
         while self.mqtt_loop_run or not self.mongo_queue.empty():
             try:
-                data = self.mongo_queue.get(timeout=0.1)
+                batch = [self.mongo_queue.get(timeout=0.1)]
             except queue.Empty:
                 continue
-            coll.insert_one(data)
+            while not self.mongo_queue.empty() and len(batch) < 500:
+                batch.append(self.mongo_queue.get_nowait())
+            coll.insert_many(batch)
         return
 
     def on_connect(self, client, userdata, flags, reason_code, properties):
@@ -97,7 +99,7 @@ class MqttConnection:
         self.connection_buffer.append(data)
         self.messages_buffer.append(data)
         if self.use_mongo:
-            self.mongo_queue.put(data)
+            self.mongo_queue.put(dict(data))
 
     def run(self):
         if self.use_mongo:

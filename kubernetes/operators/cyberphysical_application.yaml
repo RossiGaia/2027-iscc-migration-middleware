@@ -25,10 +25,13 @@ spec:
             spec:
               type: object
               properties:
+                strategy:
+                  type: string
+                  enum: ["auto", "replicate", "rebuild", "share"]
+                runId:
+                  type: string
                 migrate:
                   type: boolean
-                mirrorTime:
-                  type: number
                 source:
                   type: string
                 twinType:

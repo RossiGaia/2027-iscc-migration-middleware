@@ -25,6 +25,7 @@ pymongo==4.16.0
 pyparsing==3.3.2
 python-dateutil==2.9.0.post0
 PyYAML==6.0.2
+redis==7.2.0
 requests==2.32.5
 six==1.17.0
 urllib3==2.5.0

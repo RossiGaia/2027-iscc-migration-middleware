@@ -9,6 +9,7 @@ import logging
 import itertools
 import events
 from redis import StrictRedis
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ class Processing:
         self.mongo_collection = mongo_collection
         self.odte_t = threading.Thread(target=self.odte_computation, daemon=True)
         self.messages_buffer = messages_buffer
+        self.preloading = False
 
         self.redis_client = redis_client
         self.recent_rows = []
@@ -101,6 +103,9 @@ class Processing:
             except:
                 logger.error("Could not connect to mongo.")
                 sys.exit(1)
+
+    def _redis_mode(self) -> bool:
+        return self.redis_client is not None and not self.preloading
 
     def _load_from_redis(self):
         logger.debug("Loaded from Redis.")
@@ -142,7 +147,7 @@ class Processing:
                 time.sleep(0.001)
                 continue
 
-            if self.redis_client:
+            if self._redis_mode():
                 self._load_from_redis()
             
             seq = raw_msg["payload"]["seq_id"]
@@ -160,7 +165,7 @@ class Processing:
             snap["processing_time_s"] = processing_time
 
             
-            if self.redis_client:
+            if self._redis_mode():
                 self._save_to_redis(snap)
             else:
                 with self.lock:
@@ -346,7 +351,7 @@ class Processing:
             return float(default)
 
     def _rolling_stats(self, key: str, window: int = 50):
-        if self.redis_client:
+        if self._redis_mode():
             rows = self.recent_rows
         else:
             with self.lock:
@@ -590,3 +595,56 @@ class Processing:
 
             new_proc_buffer = different_items["processing_buffer"]
             self.processing_buffer.extend(new_proc_buffer)
+
+
+    def preload(self, n: int) -> None:
+        assert self.mongo_client is not None
+        assert self.mongo_db is not None
+        assert self.mongo_collection is not None
+        assert self.connection_buffer.maxlen is not None
+
+        self.preloading = self.redis_client is not None
+
+        rng = random.Random(0)
+        coll = self.mongo_client[self.mongo_db][self.mongo_collection] if self.use_mongo else None
+        batch = []
+        for seq in range(n):
+            msg = {"topic": "preload", "key": f"pre{seq}", "origin": "preload",
+                "recv_timestamp": time.time(),
+                "payload": {"seq_id": seq, "creation_timestamp": time.time(),
+                            "status": {"load": rng.uniform(0, 1),
+                                        "angular_speed": rng.uniform(5, 10),
+                                        "motor_vibration": rng.uniform(0, 4),
+                                        "belt_tension": rng.uniform(200, 300),
+                                        "ambient_temperature": rng.uniform(18, 25),
+                                        "motor_temperature": rng.uniform(40, 70),
+                                        "belt_friction": rng.uniform(0.02, 0.06)}}}
+            while len(self.connection_buffer) >= self.connection_buffer.maxlen - 1:
+                time.sleep(0.01)
+            self.connection_buffer.append(msg)
+            if coll is not None:
+                batch.append(dict(msg))
+                if len(batch) == 1000:
+                    coll.insert_many(batch)
+                    batch = []
+        if coll is not None and batch:
+            coll.insert_many(batch)
+        while self.connection_buffer or self.last_applied_pt_seq < n - 1:
+            time.sleep(0.05)
+
+        if self.preloading:
+            assert self.processing_buffer.maxlen is not None
+            assert self.redis_client is not None
+            with self.lock:
+                snaps = list(self.processing_buffer)
+                self.processing_buffer.clear()
+            p = self.redis_client.pipeline(transaction=False)
+            for i, snap in enumerate(snaps, 1):
+                p.rpush("buf", json.dumps(snap))
+                if i % 500 == 0:
+                    p.execute()
+            p.ltrim("buf", -self.processing_buffer.maxlen, -1)
+            p.set("params", json.dumps(asdict(self.conveyor_params)))
+            p.set("last_seq", self.last_applied_pt_seq)
+            p.execute()
+            self.preloading = False

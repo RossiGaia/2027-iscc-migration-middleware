@@ -31,6 +31,7 @@ spec:
       labels:
         app: mongo
     spec:
+      nodeSelector: {zone: cloud}
       containers:
         - name: mongo
           image: mongo:7.0
@@ -39,6 +40,8 @@ spec:
             - "--dbpath"
             - "/data/db"
             - "--bind_ip_all"
+            - "--wiredTigerCacheSizeGB"
+            - "0.5"
 
           ports:
             - containerPort: 27017
@@ -54,14 +57,6 @@ spec:
                 secretKeyRef:
                   name: mongo-creds
                   key: password
-
-          resources:
-            requests:
-              cpu: 10m
-              memory: 96Mi
-            limits:
-              cpu: 150m
-              memory: 256Mi
 
           volumeMounts:
             - name: data
