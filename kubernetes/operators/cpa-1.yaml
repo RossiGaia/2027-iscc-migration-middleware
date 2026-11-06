@@ -35,7 +35,7 @@ spec:
               spec:
                 containers:
                   - name: dt-1-edge
-                    image: docker.io/rssgai/2027-iscc-dt:v5
+                    image: docker.io/rssgai/2027-iscc-dt:v6
                     imagePullPolicy: IfNotPresent
                     env:
                       - name: POD_NAME
@@ -88,7 +88,7 @@ spec:
               spec:
                 containers:
                   - name: dt-1-cloud
-                    image: docker.io/rssgai/2027-iscc-dt:v5
+                    image: docker.io/rssgai/2027-iscc-dt:v6
                     imagePullPolicy: IfNotPresent
                     env:
                     - name: POD_NAME

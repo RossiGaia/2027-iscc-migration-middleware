@@ -28,8 +28,10 @@ DONE = RUNS / "done.txt"
 FAILED = RUNS / "failed.txt"
 SKIPPED = RUNS / "skipped.txt"
 
+
 class Skip(Exception):
     pass
+
 
 # ---------------------------------------------------------------- shell helpers
 
@@ -48,7 +50,10 @@ def ssh(ip: str, cmd: str, check: bool = True) -> str:
 def kubectl(args: str, check: bool = True, stdin: str | None = None) -> str:
     return sh(f"kubectl {args}", check, stdin)
 
-def post_retry(url: str, params: dict | None = None, timeout: float = 1800, wait_s: float = 60) -> requests.Response:
+
+def post_retry(
+    url: str, params: dict | None = None, timeout: float = 1800, wait_s: float = 60
+) -> requests.Response:
     deadline = time.time() + wait_s
     while True:
         try:
@@ -59,6 +64,7 @@ def post_retry(url: str, params: dict | None = None, timeout: float = 1800, wait
             if time.time() > deadline:
                 raise
             time.sleep(1)
+
 
 # ---------------------------------------------------------------- grid
 
@@ -122,7 +128,11 @@ def set_link(bw_mbps: float, rtt_ms: float) -> None:
     iface = CFG["iface"]
     for ip, other in ((edge, cloud), (cloud, edge)):
         ssh(ip, f"sudo tc qdisc del dev {iface} root", check=False)
-        ssh(ip, f"sudo tc qdisc add dev {iface} root handle 1: prio")
+        ssh(
+            ip,
+            f"sudo tc qdisc add dev {iface} root handle 1: prio bands 3 "
+            f"priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+        )
         limit = max(10, round(bw_mbps * 1e6 * 0.05 / (8 * 1500)))
         ssh(
             ip,
@@ -146,7 +156,9 @@ def pods_of(app: str) -> list[str]:
 
 def reset() -> None:
     for zone in ("edge", "cloud"):
-        ssh(CFG["nodes"][zone], "sudo find /events -name '*.jsonl' -delete", check=False)
+        ssh(
+            CFG["nodes"][zone], "sudo find /events -name '*.jsonl' -delete", check=False
+        )
     kubectl(f"delete cpa {CFG['cpa_name']} --ignore-not-found --wait=true")
     deadline = time.time() + 300
     while any(pods_of(a) for a in CFG["dt_apps"].values()):
@@ -274,11 +286,13 @@ def wait_recovered(url: str, timeout: float) -> bool:
         time.sleep(1)
     return False
 
+
 def baseline_ok(url: str) -> float:
     try:
         return float(requests.get(f"{url}/odte", timeout=2).text.split()[1])
     except (requests.RequestException, ValueError, IndexError):
         return 0.0
+
 
 # ---------------------------------------------------------------- collection
 
@@ -320,6 +334,12 @@ def run_one(run: dict) -> None:
 
     pt = start_pt(run, start_seq=k, out_dir=out)
     try:
+        for zone in ("edge", "cloud"):
+            requests.post(
+                f"http://{CFG['nodes'][zone]}:9200/snapshot",
+                params={"run_id": run["run_id"], "label": "baseline"},
+                timeout=2,
+            )
         time.sleep(CFG["warmup_s"])
         meta["baseline_odte"] = baseline_ok(src_url)
         if meta["baseline_odte"] < CFG["odte_threshold"]:

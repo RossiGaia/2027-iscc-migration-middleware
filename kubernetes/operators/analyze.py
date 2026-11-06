@@ -9,6 +9,7 @@ Definitions (all relative to the operator's trigger):
               created after the trigger, minus the update period 1/rate
   recovery_s  trigger -> apply time of the last post-trigger update whose latency
               (apply - creation) exceeds DEADLINE; 0 if none
+  margin_s    last observed update - recovery end; < ~5 s means recovery may be truncated
   lost        PT seqs created after trigger (and >= TAIL before PT stop) never applied
   dup         live applications of the same seq beyond the first
   net_MB      cross-worker traffic: sum over both workers of tx delta (trigger -> end)
@@ -79,6 +80,7 @@ def analyze(run_dir):
     pause = max(0.0, gap - 1.0 / meta["rate"])  # excess over the normal update period
 
     late = [first_apply[s] for s in seqs if lat[s] > DEADLINE]
+    last_apply = max((first_apply[s] for s in seqs), default=t0)
     rec_end = max(late) if late else t0
     recovery = rec_end - t0
     total = max(t_ops, rec_end) - t0
@@ -108,6 +110,8 @@ def analyze(run_dir):
         "total_s": round(total, 3), "ops_s": round(t_ops - t0, 3),
         "pause_s": round(pause, 3), "recovery_s": round(recovery, 3),
         "lost": lost, "dup": dup,
+        # seconds observed after recovery; near 0 means the run ended before the DT caught up
+        "margin_s": round(last_apply - rec_end, 3),
         "net_MB": round(net, 1), "cpu_core_s": round(cpu, 1),
         "mem_dst_MB": None if mem_dst is None else round(mem_dst, 1),
         "est_total_s": None if "total" not in se else round(se["total"], 2),
