@@ -56,7 +56,7 @@ def cost(k, s):
     r = T.loc[k + (s,)]
     return r.total if r.ok else np.inf
 
-pol = {"Middleware": [], "Always pre-copy": [], "Always rebuild": [], "Always sharing": [], "Random": []}
+pol = {"Middleware": [], "Always pre-copy": [], "Always rebuild": [], "Always sharing": []}
 wts = {p: [] for p in pol}
 for _, r in sc.iterrows():
     k = tuple(r[key])
@@ -64,8 +64,6 @@ for _, r in sc.iterrows():
     for p, s in [("Middleware", r.decision), ("Always pre-copy", "replicate"),
                  ("Always rebuild", "rebuild"), ("Always sharing", "share")]:
         pol[p].append(cost(k, s) - o); wts[p].append(1.0)
-    for s in ORDER:
-        pol["Random"].append(cost(k, s) - o); wts["Random"].append(1 / 3)
 
 # ---------------------------------------------------------------- Fig. 1: crossover
 fig, axes = plt.subplots(2, 3, figsize=(7.16, 3.4), sharex=True)
@@ -152,24 +150,6 @@ ax.legend(frameon=False, loc="upper left")
 fig.tight_layout()
 fig.savefig(f"{OUT}/fig_predicted.pdf"); plt.close(fig)
 
-# ---------------------------------------------------------------- Fig. 4: regret CDF
-fig, ax = plt.subplots(figsize=(3.5, 2.4))
-style = {"Middleware": (INK, "-", 2.0), "Always pre-copy": (COL["replicate"], "-", 1.2),
-         "Always rebuild": (COL["rebuild"], "--", 1.2), "Always sharing": (COL["share"], ":", 1.4),
-         "Random": (MUTED, "-.", 1.2)}
-xs = np.linspace(0, 40, 801)
-for p, v in pol.items():
-    v, w = np.array(v), np.array(wts[p])
-    y = [(w[v <= x]).sum() / w.sum() for x in xs]
-    colr, ls, lw = style[p]
-    ax.plot(xs, y, color=colr, ls=ls, lw=lw, label=p)
-ax.set_xlim(0, 40); ax.set_ylim(0, 1.02)
-ax.set_xlabel("Extra migration time vs. oracle (s)")
-ax.set_ylabel("Fraction of scenarios")
-ax.legend(frameon=False, loc="lower right")
-fig.tight_layout()
-fig.savefig(f"{OUT}/fig_regret.pdf"); plt.close(fig)
-
 # ---------------------------------------------------------------- Table: policy comparison
 rows = []
 for p, v in pol.items():
@@ -182,3 +162,29 @@ for p, v in pol.items():
                  "max_extra_s": round(float(v[fin].max()), 2)})
 pd.DataFrame(rows).to_csv(f"{OUT}/table_policies.csv", index=False)
 print(pd.DataFrame(rows).to_string(index=False))
+
+
+# ---------------------------------------------------------------- Fig. 4: policy comparison
+t = pd.DataFrame(rows)
+labels = [p.replace("Always ", "Only ") for p in t.policy]
+y = list(range(len(t)))[::-1]
+fig, (a, b) = plt.subplots(1, 2, figsize=(3.5, 2.3), sharey=True, gridspec_kw={"width_ratios": [1.6, 1]})
+plt.rcParams.update({"axes.grid": False})
+h = 0.36
+a.barh([i + h / 2 for i in y], t.zero_regret_pct, h, color=COL["replicate"], label="Best strategy chosen")
+a.barh([i - h / 2 for i in y], t.within_bound_pct, h, color="#a9c9ef", label="Within recovery bound")
+for i, z, w in zip(y, t.zero_regret_pct, t.within_bound_pct):
+    a.text(z + 1.5, i + h / 2, f"{z:.0f}", va="center", fontsize=6.5, color=INK2)
+    a.text(w + 1.5, i - h / 2, f"{w:.0f}", va="center", fontsize=6.5, color=INK2)
+a.set_xlim(0, 112); a.set_xticks([0, 50, 100]); a.set_xlabel("Scenarios (%)")
+a.set_yticks(y, labels); a.tick_params(axis="y", length=0, labelcolor=INK2)
+a.grid(axis="x", color=GRID, lw=0.6); a.grid(axis="y", visible=False); a.set_axisbelow(True)
+a.legend(frameon=False, fontsize=6.5, loc="lower left", bbox_to_anchor=(-0.45, 1.0), ncol=2)
+b.barh(y, t.median_extra_s, 0.5, color=MUTED)
+for i, m in zip(y, t.median_extra_s):
+    b.text(m + 0.15, i, f"{m:.1f}", va="center", fontsize=6.5, color=INK2)
+b.set_xlim(0, 8.5); b.set_xlabel("Median extra\ntime (s)")
+b.grid(axis="x", color=GRID, lw=0.6); b.grid(axis="y", visible=False); b.set_axisbelow(True)
+b.tick_params(axis="y", length=0)
+fig.tight_layout(rect=(0, 0, 1, 0.95))
+fig.savefig(f"{OUT}/fig_policies.pdf"); plt.close(fig)
