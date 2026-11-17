@@ -1,141 +1,196 @@
-"""Per-run metrics for the ISCC pilot / campaign.
+"""Per-run metrics for the ISCC campaign.
 
-Usage: python3 analyze.py <results_dir> [out.csv]
+Usage: python3 analyze.py <results_dir> [out.csv] [--delta SECONDS]
 
-Definitions (all relative to the operator's trigger):
-  total_s     trigger -> max(migration_ops_end, recovery end)
-  ops_s       trigger -> migration_ops_end (orchestration only)
-  pause_s     largest gap between first-application times of consecutive PT seqs
-              created after the trigger, minus the update period 1/rate
-  recovery_s  trigger -> apply time of the last post-trigger update whose latency
-              (apply - creation) exceeds DEADLINE; 0 if none
-  margin_s    last observed update - recovery end; < ~5 s means recovery may be truncated
-  lost        PT seqs created after trigger (and >= TAIL before PT stop) never applied
-  dup         live applications of the same seq beyond the first
-  net_MB      cross-worker traffic: sum over both workers of tx delta (trigger -> end)
-  cpu_core_s  sum over both workers of node CPU delta (trigger -> end)
-  mem_dst_MB  peak memory of the destination DT pod
+Age of information (AoI). At time t, the AoI of the DT is t minus the creation
+time of the most recent update that any DT instance has applied. It grows
+linearly between applications and drops when a fresher update is applied.
+In normal operation it reaches about 1 / rate before each update, so the DT is
+stale when its AoI exceeds the threshold 1 / rate + delta.
+
+Definitions (times in the CSV are in seconds):
+  pause_s       downtime: the longest interval between the first applications of
+                two consecutive updates (by any instance), minus the normal
+                interval between two updates (1 / rate)
+  recovery_s    stale time: total time after the trigger in which the AoI of the
+                DT exceeds the threshold
+  peak_aoi_s    highest AoI after the trigger
+  stale_end_s   time from the trigger until the AoI exceeds the threshold for the
+                last time (0 if it never does)
+  total_s       time from the trigger until both the migration operations have
+                ended and the DT is no longer stale (max of ops_s and stale_end_s)
+  ops_s         time from the trigger until the migration operations have ended
+  lost          updates created after the trigger that no instance ever applies
+                (the last TAIL_S seconds of the run are excluded)
+  dup           live applications of an update beyond the first one
+  margin_s      time the DT is observed after stale_end_s; near 0 means the run
+                ended before the DT caught up
+  net_MB        traffic sent by both workers between the trigger and the end
+  cpu_core_s    CPU time used by both workers between the trigger and the end
+  mem_dst_MB    peak memory of the target DT pod
 """
-import csv, glob, json, os, sys
+import argparse
+import csv
+import glob
+import json
+import os
 from collections import defaultdict
 
-DEADLINE = 1.0
-TAIL = 5.0
+TAIL_S = 5.0  # updates created in the last seconds of the run may still be in flight
 
 
-def jl(path):
-    out = []
-    with open(path) as f:
-        for line in f:
+def read_jsonl(path):
+    events = []
+    with open(path) as file:
+        for line in file:
             line = line.strip()
-            if line:
-                try:
-                    out.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-    return out
-
-
-def analyze(run_dir):
-    meta = json.load(open(os.path.join(run_dir, "run.json")))
-    rid = meta["run_id"]
-    # keep only operator events from this run, not from an older run with the same id
-    op = [e for e in jl(os.path.join(run_dir, "operator.jsonl"))
-          if e.get("run_id") == rid and e["ts"] / 1e9 >= meta["started"]]
-    ev = {}
-    for e in op:
-        ev.setdefault(e["event"], e)
-    if "trigger" not in ev or "migration_ops_end" not in ev:
-        return None
-    t0 = ev["trigger"]["ts"] / 1e9
-    t_ops = ev["migration_ops_end"]["ts"] / 1e9
-    dst_uid = ev.get("dst_ready", {}).get("uid")
-
-    pt = [e for e in jl(os.path.join(run_dir, "pt.jsonl")) if e.get("run_id") == rid]
-    pt_after = {e["seq"]: e["creation_ts"] for e in pt if e["creation_ts"] >= t0}
-    pt_end = max((e["creation_ts"] for e in pt), default=t0)
-
-    first_apply = {}
-    lat = {}
-    napply = defaultdict(int)
-    dt_files = glob.glob(os.path.join(run_dir, "*", "dt-*.jsonl"))
-    for f in dt_files:
-        for e in jl(f):
-            if e.get("event") != "update" or e.get("run_id") != rid:
+            if not line:
                 continue
-            s = e["seq"]
-            if e.get("origin") == "live":
-                napply[s] += 1
-            if s not in first_apply or e["apply_ts"] < first_apply[s]:
-                first_apply[s] = e["apply_ts"]
-                lat[s] = e["apply_ts"] - e["creation_ts"]
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return events
 
-    seqs = sorted(s for s in pt_after if s in first_apply)
-    applies = sorted(first_apply[s] for s in seqs)
-    # include last pre-trigger application so a pause starting at the trigger counts
-    pre = [first_apply[s] for s in first_apply if first_apply[s] < t0]
-    if pre:
-        applies = [max(pre)] + applies
-    gap = max((b - a for a, b in zip(applies, applies[1:])), default=float("nan"))
-    pause = max(0.0, gap - 1.0 / meta["rate"])  # excess over the normal update period
 
-    late = [first_apply[s] for s in seqs if lat[s] > DEADLINE]
-    last_apply = max((first_apply[s] for s in seqs), default=t0)
-    rec_end = max(late) if late else t0
-    recovery = rec_end - t0
-    total = max(t_ops, rec_end) - t0
+def age_of_information(applications, freshest_at_trigger, trigger, end, threshold):
+    """Walk the AoI from the trigger to the end of the observation.
 
-    lost = sum(1 for s, c in pt_after.items() if c <= pt_end - TAIL and s not in first_apply)
-    dup = sum(n - 1 for n in napply.values() if n > 1)
+    applications: list of (apply_time, creation_time), sorted by apply_time.
+    Returns (stale_time, peak_aoi, stale_end), with stale_end relative to the trigger.
+    """
+    stale_time = 0.0
+    peak_aoi = 0.0
+    stale_end = None
+    freshest_creation = freshest_at_trigger   # creation time of the freshest applied update
+    interval_start = trigger
+    boundaries = [(t, c) for t, c in applications if trigger < t <= end] + [(end, None)]
+    for apply_time, creation in boundaries:
+        # between interval_start and apply_time the AoI is t - freshest_creation
+        becomes_stale = freshest_creation + threshold
+        if apply_time > becomes_stale:
+            stale_time += apply_time - max(interval_start, becomes_stale)
+            stale_end = apply_time - trigger
+        peak_aoi = max(peak_aoi, apply_time - freshest_creation)
+        if creation is not None:
+            freshest_creation = max(freshest_creation, creation)
+        interval_start = apply_time
+    return stale_time, peak_aoi, (stale_end or 0.0)
 
-    # counters
-    net = cpu = 0.0
-    mem_dst = None
-    for f in glob.glob(os.path.join(run_dir, "*", "counters-*.jsonl")):
-        rows = [e for e in jl(f) if e.get("run_id") == rid]
-        c = {e["label"]: e for e in rows if e["event"] == "counters"}
-        if "trigger" in c and "end" in c:
-            net += (c["end"]["tx_bytes"] - c["trigger"]["tx_bytes"]) / 1e6
-            cpu += (c["end"]["node_cpu_usec"] - c["trigger"]["node_cpu_usec"]) / 1e6
+
+def analyze(run_dir, delta):
+    run = json.load(open(os.path.join(run_dir, "run.json")))
+    run_id = run["run_id"]
+
+    # --- operator events (ignore events of an older run with the same id)
+    operator_events = {}
+    for event in read_jsonl(os.path.join(run_dir, "operator.jsonl")):
+        if event.get("run_id") == run_id and event["ts"] / 1e9 >= run["started"]:
+            operator_events.setdefault(event["event"], event)
+    if "trigger" not in operator_events or "migration_ops_end" not in operator_events:
+        return None
+    trigger = operator_events["trigger"]["ts"] / 1e9
+    ops_end = operator_events["migration_ops_end"]["ts"] / 1e9
+    target_pod_uid = operator_events.get("dst_ready", {}).get("uid")
+
+    # --- updates created by the PT
+    pt_events = [e for e in read_jsonl(os.path.join(run_dir, "pt.jsonl")) if e.get("run_id") == run_id]
+    creation_of = {e["seq"]: e["creation_ts"] for e in pt_events}
+    pt_end = max(creation_of.values(), default=trigger)
+    seqs_after_trigger = sorted(s for s, c in creation_of.items() if trigger <= c <= pt_end - TAIL_S)
+
+    # --- applications by the DT instances (preloaded entries are not PT updates)
+    first_apply = {}               # seq -> earliest application by any instance
+    applications = []              # (apply_time, creation_time) of every application
+    live_count = defaultdict(int)  # seq -> number of live applications
+    for path in glob.glob(os.path.join(run_dir, "*", "dt-*.jsonl")):
+        for event in read_jsonl(path):
+            if event.get("event") != "update" or event.get("run_id") != run_id:
+                continue
+            if event.get("origin") == "preload":
+                continue
+            seq, applied, created = event["seq"], event["apply_ts"], event["creation_ts"]
+            applications.append((applied, created))
+            if seq not in first_apply or applied < first_apply[seq]:
+                first_apply[seq] = applied
+            if event.get("origin", "live") == "live":
+                live_count[seq] += 1
+    applications.sort()
+
+    # --- downtime: longest gap between first applications, minus the update period
+    apply_times = sorted(first_apply[s] for s in seqs_after_trigger if s in first_apply)
+    before_trigger = [t for t in first_apply.values() if t < trigger]
+    if before_trigger:
+        apply_times = [max(before_trigger)] + apply_times  # a gap starting at the trigger counts
+    longest_gap = max((b - a for a, b in zip(apply_times, apply_times[1:])), default=float("nan"))
+    downtime = max(0.0, longest_gap - 1.0 / run["rate"])
+
+    # --- age of information, observed until the last update we expect to see applied
+    applied_after_trigger = [first_apply[s] for s in seqs_after_trigger if s in first_apply]
+    observation_end = max(applied_after_trigger, default=ops_end)
+    freshest_at_trigger = max((c for t, c in applications if t <= trigger), default=trigger)
+    threshold = 1.0 / run["rate"] + delta
+    stale_time, peak_aoi, stale_end = age_of_information(
+        applications, freshest_at_trigger, trigger, observation_end, threshold)
+
+    total = max(ops_end - trigger, stale_end)
+    margin = observation_end - trigger - stale_end
+    lost = sum(1 for s in seqs_after_trigger if s not in first_apply)
+    duplicates = sum(n - 1 for n in live_count.values() if n > 1)
+
+    # --- resource counters
+    network_mb = cpu_core_s = 0.0
+    target_memory_mb = None
+    for path in glob.glob(os.path.join(run_dir, "*", "counters-*.jsonl")):
+        rows = [e for e in read_jsonl(path) if e.get("run_id") == run_id]
+        snapshots = {e["label"]: e for e in rows if e["event"] == "counters"}
+        if "trigger" in snapshots and "end" in snapshots:
+            network_mb += (snapshots["end"]["tx_bytes"] - snapshots["trigger"]["tx_bytes"]) / 1e6
+            cpu_core_s += (snapshots["end"]["node_cpu_usec"] - snapshots["trigger"]["node_cpu_usec"]) / 1e6
         for e in rows:
-            if e["event"] == "mem_peak" and dst_uid and dst_uid in e["peaks_bytes"]:
-                mem_dst = e["peaks_bytes"][dst_uid] / 2**20
+            if e["event"] == "mem_peak" and target_pod_uid and target_pod_uid in e["peaks_bytes"]:
+                target_memory_mb = e["peaks_bytes"][target_pod_uid] / 2**20
 
-    est = ev.get("estimates", {}).get("estimates", {})
-    strat = meta["strategy"]
-    se = est.get(strat, {})
+    estimates = operator_events.get("estimates", {}).get("estimates", {}).get(run["strategy"], {})
+
+    def rounded(value, digits=3):
+        return None if value is None else round(value, digits)
+
     return {
-        "run_id": rid, "state_mb": meta["state_mb"], "bw_mbps": meta["bw_mbps"],
-        "rate": meta["rate"], "dir": f'{meta["src"]}->{meta["dst"]}', "strategy": strat,
-        "total_s": round(total, 3), "ops_s": round(t_ops - t0, 3),
-        "pause_s": round(pause, 3), "recovery_s": round(recovery, 3),
-        "lost": lost, "dup": dup,
-        # seconds observed after recovery; near 0 means the run ended before the DT caught up
-        "margin_s": round(last_apply - rec_end, 3),
-        "net_MB": round(net, 1), "cpu_core_s": round(cpu, 1),
-        "mem_dst_MB": None if mem_dst is None else round(mem_dst, 1),
-        "est_total_s": None if "total" not in se else round(se["total"], 2),
-        "est_recovery_s": None if "recovery" not in se else round(se["recovery"], 2),
-        "decision": ev.get("decision", {}).get("chosen"),
-        "recovered_online": meta.get("recovered_online"),
-        "run_wall_s": round(meta["finished"] - meta["started"], 1),
+        "run_id": run_id, "state_mb": run["state_mb"], "bw_mbps": run["bw_mbps"],
+        "rate": run["rate"], "dir": f"{run['src']}->{run['dst']}", "strategy": run["strategy"],
+        "total_s": rounded(total), "ops_s": rounded(ops_end - trigger),
+        "pause_s": rounded(downtime), "recovery_s": rounded(stale_time),
+        "peak_aoi_s": rounded(peak_aoi), "stale_end_s": rounded(stale_end),
+        "lost": lost, "dup": duplicates, "margin_s": rounded(margin),
+        "net_MB": round(network_mb, 1), "cpu_core_s": round(cpu_core_s, 1),
+        "mem_dst_MB": rounded(target_memory_mb, 1),
+        "est_total_s": rounded(estimates.get("total"), 2),
+        "est_recovery_s": rounded(estimates.get("recovery"), 2),
+        "decision": operator_events.get("decision", {}).get("chosen"),
+        "recovered_online": run.get("recovered_online"),
+        "run_wall_s": round(run["finished"] - run["started"], 1),
     }
 
 
 def main():
-    root = sys.argv[1]
-    out = sys.argv[2] if len(sys.argv) > 2 else "metrics.csv"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("results_dir")
+    parser.add_argument("out_csv", nargs="?", default="metrics.csv")
+    parser.add_argument("--delta", type=float, default=1.0,
+                        help="tolerance in seconds added to 1/rate in the AoI threshold")
+    args = parser.parse_args()
     rows = []
-    for d in sorted(glob.glob(os.path.join(root, "*"))):
-        if os.path.isfile(os.path.join(d, "run.json")):
-            r = analyze(d)
-            if r:
-                rows.append(r)
-    with open(out, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0]))
-        w.writeheader()
-        w.writerows(rows)
-    print(f"{len(rows)} runs -> {out}")
+    for run_dir in sorted(glob.glob(os.path.join(args.results_dir, "*"))):
+        if os.path.isfile(os.path.join(run_dir, "run.json")):
+            row = analyze(run_dir, args.delta)
+            if row:
+                rows.append(row)
+    with open(args.out_csv, "w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"{len(rows)} runs, delta = {args.delta} s -> {args.out_csv}")
 
 
 if __name__ == "__main__":
